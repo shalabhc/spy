@@ -1,0 +1,104 @@
+"""
+Benchmark: str.split variants.
+
+  - split       : the stdlib str.split() (committed low-level byte loop)  -> list[str]
+  - find        : split built on the stdlib str.find() kernel            -> list[str]
+  - split_views : stdlib str.split_views(), non-owning StrView parts      -> ViewArray
+
+split/find return owned strings; split_views returns views that borrow the
+source string, so it avoids one allocation per field.
+
+Only the split() call is timed; the result is kept in a local and the checksum
+(sum of field lengths) is computed after the clock is stopped.
+
+Run:
+    spy build -x --release benchmarks/split_bench.spy
+"""
+
+from time import time
+from _str import ViewArray
+
+
+# split built on the stdlib str.find() kernel: scan for boundaries, slice per part
+def split_find(self: str, sep: str) -> list[str]:
+    sep_len = len(sep)
+    n = len(self)
+    result = list[str]()
+    start: i32 = 0
+    idx = self.find(sep, start)
+    while idx != -1:
+        result.append(self[start:idx])
+        start = idx + sep_len
+        idx = self.find(sep, start)
+    result.append(self[start:n])
+    return result
+
+
+# verification helpers, run *after* the clock is stopped (not part of any timing)
+def consume_str(parts: list[str]) -> i32:
+    t: i32 = 0
+    for p in parts:
+        t = t + len(p)
+    return t
+
+
+def consume_views(parts: ViewArray) -> i32:
+    t: i32 = 0
+    i = 0
+    while i < len(parts):
+        t = t + len(parts[i])
+        i = i + 1
+    return t
+
+
+def main() -> None:
+    s_mono = "hello," * 250       # single-char separator
+    s_poly = "hello|||" * 250     # multi-char separator
+    N = 100000
+
+    print("split benchmark (", N, "iterations each )")
+    print("")
+
+    r2 = s_mono.split(",")
+    t0 = time()
+    for k2 in range(N):
+        r2 = s_mono.split(",")
+    t1 = time()
+    print("split       mono:", str(t1 - t0), "s   checksum", consume_str(r2))
+
+    r3 = split_find(s_mono, ",")
+    t0 = time()
+    for k3 in range(N):
+        r3 = split_find(s_mono, ",")
+    t1 = time()
+    print("find        mono:", str(t1 - t0), "s   checksum", consume_str(r3))
+
+    r4 = s_mono.split_views(",")
+    t0 = time()
+    for k4 in range(N):
+        r4 = s_mono.split_views(",")
+    t1 = time()
+    print("split_views mono:", str(t1 - t0), "s   checksum", consume_views(r4))
+
+    print("")
+
+    r6 = s_poly.split("|||")
+    t0 = time()
+    for k6 in range(N):
+        r6 = s_poly.split("|||")
+    t1 = time()
+    print("split       poly:", str(t1 - t0), "s   checksum", consume_str(r6))
+
+    r7 = split_find(s_poly, "|||")
+    t0 = time()
+    for k7 in range(N):
+        r7 = split_find(s_poly, "|||")
+    t1 = time()
+    print("find        poly:", str(t1 - t0), "s   checksum", consume_str(r7))
+
+    r8 = s_poly.split_views("|||")
+    t0 = time()
+    for k8 in range(N):
+        r8 = s_poly.split_views("|||")
+    t1 = time()
+    print("split_views poly:", str(t1 - t0), "s   checksum", consume_views(r8))
