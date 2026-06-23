@@ -14,6 +14,14 @@ spy_time$time(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+// process CPU time (excludes time descheduled) -> more consistent for benchmarks
+static inline double
+spy_time$cpu_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static inline void
 spy_time$sleep(double seconds) {
     struct timespec req;

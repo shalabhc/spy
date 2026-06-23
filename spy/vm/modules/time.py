@@ -21,6 +21,13 @@ def w_time(vm: "SPyVM") -> W_F64:
 
 
 @TIME.builtin_func
+def w_cpu_time(vm: "SPyVM") -> W_F64:
+    import time
+
+    return W_F64(time.process_time())
+
+
+@TIME.builtin_func
 def w_sleep(vm: "SPyVM", w_seconds: W_F64) -> None:
     import time
 

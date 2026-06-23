@@ -14,7 +14,6 @@ possible to cast between str and gc_ptr[StrObject] using StrObject.{from,to}_str
 
 from unsafe import (
     gc_ptr,
-    gc_alloc,
     ptr_copy,
     ptr_copy_slice,
     ptr_cmp_slice,
@@ -63,94 +62,6 @@ class StrObject:
         "locked" and immutable.
         """
         return _StrObject_to_str(ll)
-
-
-@struct
-class StrView:
-    """
-    A non-owning slice of a str: it shares the underlying bytes and stores the
-    [start, end) range. Constructing or comparing a StrView does not allocate;
-    use to_str() to materialize an owned copy.
-
-    A StrView borrows from `s`, so it must not outlive it.
-    """
-
-    s: str
-    start: i32
-    end: i32
-
-    def __len__(self) -> i32:
-        return self.end - self.start
-
-    def to_str(self) -> str:
-        n = self.end - self.start
-        ll = StrObject.from_str(self.s)
-        out = StrObject.alloc(n)
-        if n > 0:
-            ptr_copy_slice(out.utf8, 0, n, ll.utf8, self.start, self.end)
-        return StrObject.to_str(out)
-
-    @blue.metafunc
-    def __eq__(m_self, m_other):
-        if m_other.static_type == str:
-
-            def eq_str(self: StrView, other: str) -> bool:
-                llself = StrObject.from_str(self.s)
-                llother = StrObject.from_str(other)
-                n = self.end - self.start
-                matched = True
-                if n != llother.length:
-                    matched = False
-                else:
-                    for i in range(n):
-                        if not llself.utf8[self.start + i] == llother.utf8[i]:
-                            matched = False
-                            break
-                return matched
-
-            return OpSpec(eq_str, [m_self, m_other])
-        if m_other.static_type == StrView:
-
-            def eq_view(self: StrView, other: StrView) -> bool:
-                llself = StrObject.from_str(self.s)
-                llother = StrObject.from_str(other.s)
-                n = self.end - self.start
-                matched = True
-                if n != other.end - other.start:
-                    matched = False
-                else:
-                    for i in range(n):
-                        a = llself.utf8[self.start + i]
-                        b = llother.utf8[other.start + i]
-                        if not a == b:
-                            matched = False
-                            break
-                return matched
-
-            return OpSpec(eq_view, [m_self, m_other])
-        return OpSpec.NULL
-
-
-@struct
-class ViewArray:
-    """
-    The result of str.split_views: a buffer of StrView plus its length. A single
-    heap allocation holds all the views (each of which borrows the source str).
-
-    list[StrView] would be the natural return type, but list of a value-struct
-    does not compile yet; this is the temporary workaround.
-    """
-
-    items: gc_ptr[StrView]
-    length: i32
-
-    def __len__(self) -> i32:
-        return self.length
-
-    def __getitem__(self, i: i32) -> StrView:
-        if i < 0 or i >= self.length:
-            raise IndexError
-        return self.items[i]
 
 
 @struct
@@ -458,65 +369,6 @@ class methods:
             else:
                 llnew.utf8[i] = ch
         return StrObject.to_str(llnew)
-
-    @blue.metafunc
-    def find(m_self, *args_m):
-        # find() is a metafunc whose only job is to return a force-inlined impl:
-        # that lets the scan loop be inlined at the call site (no per-call
-        # overhead), which a plain lazy-attribute method can't be. The simple
-        # OpSpec(func) form passes the original args through, so we just pick the
-        # impl by arity (one inner method per signature).
-        @force_inline
-        def _find2(self: str, sep: str, start: i32) -> i32:
-            # lowest index >= start where `sep` occurs, or -1 if not found
-            llself = StrObject.from_str(self)
-            llsep = StrObject.from_str(sep)
-            n = llself.length
-            m = llsep.length
-            result: i32 = -1
-            pos = start
-            while pos <= n - m:
-                matched = True
-                for i in range(m):
-                    if not llself.utf8[pos + i] == llsep.utf8[i]:
-                        matched = False
-                        break
-                if matched:
-                    result = pos
-                    break
-                pos = pos + 1
-            return result
-
-        @force_inline
-        def _find1(self: str, sep: str) -> i32:
-            return _find2(self, sep, 0)
-
-        if len(args_m) == 2:
-            return OpSpec(_find2)
-        elif len(args_m) == 1:
-            return OpSpec(_find1)
-        return OpSpec.NULL
-
-    def split_views(self: str, sep: str) -> ViewArray:
-        # like split(), but the parts are non-owning StrView slices into `self`:
-        # a single buffer allocation instead of one new str per field
-        sep_len = len(sep)
-        if sep_len == 0:
-            raise ValueError("empty separator")
-        n = len(self)
-        # at most n+1 parts (a 1-char separator at every position)
-        buf = gc_alloc[StrView](n + 1)
-        count: i32 = 0
-        start: i32 = 0
-        idx = self.find(sep, start)
-        while idx != -1:
-            buf[count] = StrView(self, start, idx)
-            count = count + 1
-            start = idx + sep_len
-            idx = self.find(sep, start)
-        buf[count] = StrView(self, start, n)
-        count = count + 1
-        return ViewArray(buf, count)
 
     @blue.metafunc
     def split(m_self, *args_m):

@@ -35,6 +35,23 @@ def w_str_ne(vm: "SPyVM", w_a: W_Str, w_b: W_Str) -> W_Bool:
     return vm.wrap(bool(not res))
 
 
+@OP.builtin_func
+def w_str_find_byte(vm: "SPyVM", w_s: W_Str, w_ch: W_U8, w_start: W_I32) -> W_I32:
+    # libc memchr-backed single-byte search (spy_str_find_byte in libspy/str.c)
+    assert isinstance(w_s, W_Str)
+    idx = vm.ll.call("spy_str_find_byte", w_s.ptr, vm.unwrap(w_ch), vm.unwrap(w_start))
+    return vm.wrap(idx)
+
+
+@OP.builtin_func
+def w_str_find_sub(vm: "SPyVM", w_h: W_Str, w_needle: W_Str, w_start: W_I32) -> W_I32:
+    # libc memmem-backed substring search (spy_str_find_sub in libspy/str.c)
+    assert isinstance(w_h, W_Str)
+    assert isinstance(w_needle, W_Str)
+    idx = vm.ll.call("spy_str_find_sub", w_h.ptr, w_needle.ptr, vm.unwrap(w_start))
+    return vm.wrap(idx)
+
+
 def _parse_int(vm: "SPyVM", w_s: W_Str) -> int:
     s = vm.unwrap(w_s)
     try:

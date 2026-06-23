@@ -4,6 +4,46 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+// memmem is a BSD/GNU extension; declare it explicitly since the build's strict
+// flags don't expose it via <string.h>. The symbol lives in libc either way.
+extern void *
+memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);
+
+// Find the first occurrence of byte `ch` at/after `start`, via libc memchr
+// (SIMD-optimized). Returns the index, or -1.
+int32_t
+spy_str_find_byte(spy_StrObject *s, uint8_t ch, int32_t start) {
+    const char *base = spy_StrObject_CHARS(s);
+    size_t n = s->length;
+    if (start < 0)
+        start = 0;
+    if ((size_t)start >= n)
+        return -1;
+    const void *found = memchr(base + start, (int)ch, n - (size_t)start);
+    if (found == NULL)
+        return -1;
+    return (int32_t)((const char *)found - base);
+}
+
+// Find the first occurrence of substring `needle` at/after `start`, via libc
+// memmem (full substring search). Returns the index, or -1.
+int32_t
+spy_str_find_sub(spy_StrObject *h, spy_StrObject *needle, int32_t start) {
+    const char *base = spy_StrObject_CHARS(h);
+    size_t hlen = h->length;
+    if (start < 0)
+        start = 0;
+    if ((size_t)start > hlen)
+        return -1;
+    const void *found = memmem(
+        base + start, hlen - (size_t)start, spy_StrObject_CHARS(needle), needle->length
+    );
+    if (found == NULL)
+        return -1;
+    return (int32_t)((const char *)found - base);
+}
 
 _spy_StrObject_Layout
 _spy_StrObject_layout(void) {

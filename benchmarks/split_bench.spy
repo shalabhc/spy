@@ -1,104 +1,223 @@
 """
-Benchmark: str.split variants.
+Benchmark: str.split, four implementations across five input shapes.
 
-  - split       : the stdlib str.split() (committed low-level byte loop)  -> list[str]
-  - find        : split built on the stdlib str.find() kernel            -> list[str]
-  - split_views : stdlib str.split_views(), non-owning StrView parts      -> ViewArray
+Implementations:
+  - baseline : stdlib str.split() (committed low-level byte loop)
+  - spy_find : find()-based split, pure SPy. find() = scalar find_byte() scan to
+               the separator's first byte + exact_match() to verify the rest.
+  - memchr   : same shape, byte scan is str.find_byte_c (libc memchr, SIMD).
+  - memmem   : the whole substring search is one libc memmem() call per field.
 
-split/find return owned strings; split_views returns views that borrow the
-source string, so it avoids one allocation per field.
+Inputs (all ~100 KB):
+  - dense_single      : 1-byte sep every ~6 B   (allocation-bound)
+  - dense_multi       : 3-byte sep every ~8 B   (allocation-bound)
+  - rare_single       : 1-byte sep every ~1 KB  (scan-bound)
+  - rare_multi        : 3-byte sep every ~1 KB, first byte unique to the sep
+  - rare_multi_decoys : 3-byte sep every ~1 KB, but the sep's first byte occurs
+                        every 10 B as a false start
 
-Only the split() call is timed; the result is kept in a local and the checksum
-(sum of field lengths) is computed after the clock is stopped.
+Each row is timed with CPU time (time.cpu_time), best of REPEATS runs of ITERS
+splits each (so the reported number is the least-interfered run). Only the
+split() call is timed; the checksum is computed after the clock stops.
+
+The @bench decorator wraps each split impl into a self-timing runner: it's a
+blue decorator, so the wrapped impl is captured at compile time and called as a
+direct call (SPy can't pass functions as runtime values).
 
 Run:
     spy build -x --release benchmarks/split_bench.spy
 """
 
-from time import time
-from _str import ViewArray
+from time import cpu_time
+from _str import StrObject
 
 
-# split built on the stdlib str.find() kernel: scan for boundaries, slice per part
-def split_find(self: str, sep: str) -> list[str]:
-    sep_len = len(sep)
-    n = len(self)
-    result = list[str]()
-    start: i32 = 0
-    idx = self.find(sep, start)
-    while idx != -1:
-        result.append(self[start:idx])
-        start = idx + sep_len
-        idx = self.find(sep, start)
-    result.append(self[start:n])
+# scalar single-byte scan (pure SPy)
+def find_byte(self: str, ch: u8, start: i32) -> i32:
+    ll = StrObject.from_str(self)
+    n = ll.length
+    i = start
+    while i < n and not ll.utf8[i] == ch:
+        i = i + 1
+    result: i32 = -1
+    if i < n:
+        result = i
     return result
 
 
-# verification helpers, run *after* the clock is stopped (not part of any timing)
-def consume_str(parts: list[str]) -> i32:
-    t: i32 = 0
+# true iff `sub` occurs in `self` starting exactly at idx
+def exact_match(self: str, idx: i32, sub: str) -> bool:
+    ll = StrObject.from_str(self)
+    lsub = StrObject.from_str(sub)
+    m = lsub.length
+    result = True
+    if idx + m > ll.length:
+        result = False
+    else:
+        j = 0
+        while j < m:
+            if not ll.utf8[idx + j] == lsub.utf8[j]:
+                result = False
+                break
+            j = j + 1
+    return result
+
+
+# scan with scalar find_byte, verify with exact_match
+def find_spy(self: str, sep: str, start: i32) -> i32:
+    n = len(self)
+    sep_len = len(sep)
+    first: u8 = StrObject.from_str(sep).utf8[0]
+    pos = start
+    result: i32 = -1
+    while pos <= n - sep_len:
+        cand = find_byte(self, first, pos)
+        if cand == -1 or cand > n - sep_len:
+            break
+        if sep_len == 1 or exact_match(self, cand, sep):
+            result = cand
+            break
+        pos = cand + 1
+    return result
+
+
+# scan with libc memchr (str.find_byte_c), verify with exact_match
+def find_memchr(self: str, sep: str, start: i32) -> i32:
+    n = len(self)
+    sep_len = len(sep)
+    first: u8 = StrObject.from_str(sep).utf8[0]
+    pos = start
+    result: i32 = -1
+    while pos <= n - sep_len:
+        cand = self.find_byte_c(first, pos)
+        if cand == -1 or cand > n - sep_len:
+            break
+        if sep_len == 1 or exact_match(self, cand, sep):
+            result = cand
+            break
+        pos = cand + 1
+    return result
+
+
+# combine per-field hashes (content + order): a real correctness check, and still
+# forces the split result to be materialized so it can't be optimized away
+def checksum(parts: list[str]) -> i32:
+    h: i32 = 0
     for p in parts:
-        t = t + len(p)
-    return t
+        h = h * 31 + hash(p)
+    return h
 
 
-def consume_views(parts: ViewArray) -> i32:
-    t: i32 = 0
-    i = 0
-    while i < len(parts):
-        t = t + len(parts[i])
-        i = i + 1
-    return t
+# blue decorator: turn a split impl `fn(s, sep) -> list[str]` into a self-timing
+# runner `(label, s, sep, iters, repeats) -> None` that prints best-of-repeats.
+@blue
+def bench(fn):
+    def run(label: str, s: str, sep: str, iters: i32, repeats: i32) -> None:
+        best: f64 = 0.0
+        res = fn(s, sep)
+        rr = 0
+        while rr < repeats:
+            t0 = cpu_time()
+            k = 0
+            while k < iters:
+                res = fn(s, sep)
+                k = k + 1
+            dt = cpu_time() - t0
+            if rr == 0 or dt < best:
+                best = dt
+            rr = rr + 1
+        print(label, str(best), "s  ck", checksum(res))
+
+    return run
+
+
+@bench
+def split_baseline(s: str, sep: str) -> list[str]:
+    return s.split(sep)
+
+
+@bench
+def split_spy_find(s: str, sep: str) -> list[str]:
+    sep_len = len(sep)
+    n = len(s)
+    result = list[str]()
+    start: i32 = 0
+    idx = find_spy(s, sep, start)
+    while idx != -1:
+        result.append(s[start:idx])
+        start = idx + sep_len
+        idx = find_spy(s, sep, start)
+    result.append(s[start:n])
+    return result
+
+
+@bench
+def split_memchr(s: str, sep: str) -> list[str]:
+    sep_len = len(sep)
+    n = len(s)
+    result = list[str]()
+    start: i32 = 0
+    idx = find_memchr(s, sep, start)
+    while idx != -1:
+        result.append(s[start:idx])
+        start = idx + sep_len
+        idx = find_memchr(s, sep, start)
+    result.append(s[start:n])
+    return result
+
+
+@bench
+def split_memmem(s: str, sep: str) -> list[str]:
+    sep_len = len(sep)
+    n = len(s)
+    result = list[str]()
+    start: i32 = 0
+    idx = s.find_sub_c(sep, start)
+    while idx != -1:
+        result.append(s[start:idx])
+        start = idx + sep_len
+        idx = s.find_sub_c(sep, start)
+    result.append(s[start:n])
+    return result
 
 
 def main() -> None:
-    s_mono = "hello," * 250       # single-char separator
-    s_poly = "hello|||" * 250     # multi-char separator
-    N = 100000
+    s_dense_single = "hello," * 16667                  # ~100 KB
+    s_dense_multi = "hello|||" * 12500                 # ~100 KB
+    s_rare_single = ("a" * 1000 + ",") * 100           # ~100 KB
+    s_rare_multi = ("a" * 1000 + "qzx") * 100          # ~100 KB, no decoys
+    s_rare_decoys = ("qabcdefghi" * 100 + "qzx") * 100  # ~100 KB, 'q' every 10 B
+    ITERS = 3000
+    REPEATS = 3
 
-    print("split benchmark (", N, "iterations each )")
-    print("")
-
-    r2 = s_mono.split(",")
-    t0 = time()
-    for k2 in range(N):
-        r2 = s_mono.split(",")
-    t1 = time()
-    print("split       mono:", str(t1 - t0), "s   checksum", consume_str(r2))
-
-    r3 = split_find(s_mono, ",")
-    t0 = time()
-    for k3 in range(N):
-        r3 = split_find(s_mono, ",")
-    t1 = time()
-    print("find        mono:", str(t1 - t0), "s   checksum", consume_str(r3))
-
-    r4 = s_mono.split_views(",")
-    t0 = time()
-    for k4 in range(N):
-        r4 = s_mono.split_views(",")
-    t1 = time()
-    print("split_views mono:", str(t1 - t0), "s   checksum", consume_views(r4))
+    print("split benchmark (CPU time, best of 3)")
 
     print("")
+    split_baseline("dense_single  baseline", s_dense_single, ",", ITERS, REPEATS)
+    split_spy_find("dense_single  spy_find", s_dense_single, ",", ITERS, REPEATS)
+    split_memchr("dense_single  memchr  ", s_dense_single, ",", ITERS, REPEATS)
+    split_memmem("dense_single  memmem  ", s_dense_single, ",", ITERS, REPEATS)
 
-    r6 = s_poly.split("|||")
-    t0 = time()
-    for k6 in range(N):
-        r6 = s_poly.split("|||")
-    t1 = time()
-    print("split       poly:", str(t1 - t0), "s   checksum", consume_str(r6))
+    print("")
+    split_baseline("dense_multi   baseline", s_dense_multi, "|||", ITERS, REPEATS)
+    split_spy_find("dense_multi   spy_find", s_dense_multi, "|||", ITERS, REPEATS)
+    split_memchr("dense_multi   memchr  ", s_dense_multi, "|||", ITERS, REPEATS)
+    split_memmem("dense_multi   memmem  ", s_dense_multi, "|||", ITERS, REPEATS)
 
-    r7 = split_find(s_poly, "|||")
-    t0 = time()
-    for k7 in range(N):
-        r7 = split_find(s_poly, "|||")
-    t1 = time()
-    print("find        poly:", str(t1 - t0), "s   checksum", consume_str(r7))
+    print("")
+    split_baseline("rare_single   baseline", s_rare_single, ",", ITERS, REPEATS)
+    split_spy_find("rare_single   spy_find", s_rare_single, ",", ITERS, REPEATS)
+    split_memchr("rare_single   memchr  ", s_rare_single, ",", ITERS, REPEATS)
+    split_memmem("rare_single   memmem  ", s_rare_single, ",", ITERS, REPEATS)
 
-    r8 = s_poly.split_views("|||")
-    t0 = time()
-    for k8 in range(N):
-        r8 = s_poly.split_views("|||")
-    t1 = time()
-    print("split_views poly:", str(t1 - t0), "s   checksum", consume_views(r8))
+    print("")
+    split_baseline("rare_multi    baseline", s_rare_multi, "qzx", ITERS, REPEATS)
+    split_spy_find("rare_multi    spy_find", s_rare_multi, "qzx", ITERS, REPEATS)
+    split_memchr("rare_multi    memchr  ", s_rare_multi, "qzx", ITERS, REPEATS)
+    split_memmem("rare_multi    memmem  ", s_rare_multi, "qzx", ITERS, REPEATS)
+
+    print("")
+    split_baseline("rare_decoys   baseline", s_rare_decoys, "qzx", ITERS, REPEATS)
+    split_spy_find("rare_decoys   spy_find", s_rare_decoys, "qzx", ITERS, REPEATS)
+    split_memchr("rare_decoys   memchr  ", s_rare_decoys, "qzx", ITERS, REPEATS)
+    split_memmem("rare_decoys   memmem  ", s_rare_decoys, "qzx", ITERS, REPEATS)

@@ -104,7 +104,19 @@ spy_str_ne(spy_StrObject *a, spy_StrObject *b) {
 
 int32_t WASM_EXPORT(spy_str_hash)(spy_StrObject *s);
 
+// libc-memchr-backed single-byte search (see str.c)
+int32_t WASM_EXPORT(spy_str_find_byte)(spy_StrObject *s, uint8_t ch, int32_t start);
+
+// libc-memmem-backed substring search (see str.c)
+int32_t WASM_EXPORT(spy_str_find_sub)(
+    spy_StrObject *h,
+    spy_StrObject *needle,
+    int32_t start
+);
+
 #define spy_operator$str_eq spy_str_eq
+#define spy_operator$str_find_byte spy_str_find_byte
+#define spy_operator$str_find_sub spy_str_find_sub
 #define spy_operator$str_ne spy_str_ne
 #define spy_operator$str_to_complex128 spy_str_to_complex128
 #define spy_builtins$str$__str__ spy_str_identity
